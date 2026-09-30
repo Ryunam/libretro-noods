@@ -54,6 +54,14 @@ void Gpu2D::saveState(MemFile &file) {
     fwrite(&bldAlpha, sizeof(bldAlpha), 1, file);
     fwrite(&bldY, sizeof(bldY), 1, file);
     fwrite(&masterBright, sizeof(masterBright), 1, file);
+#ifdef __LIBRETRO__
+    fwrite(internalX, 1, sizeof(internalX), file);
+    fwrite(internalY, 1, sizeof(internalY), file);
+    fwrite(framebuffer, 1, sizeof(framebuffer), file);
+    fwrite(layers, 1, sizeof(layers), file);
+    fwrite(priorities, 1, sizeof(priorities), file);
+    fwrite(blendBits, 1, sizeof(blendBits), file);
+#endif
 }
 
 void Gpu2D::loadState(MemFile &file) {
@@ -81,6 +89,14 @@ void Gpu2D::loadState(MemFile &file) {
     fread(&bldAlpha, sizeof(bldAlpha), 1, file);
     fread(&bldY, sizeof(bldY), 1, file);
     fread(&masterBright, sizeof(masterBright), 1, file);
+#ifdef __LIBRETRO__
+    fread(internalX, 1, sizeof(internalX), file);
+    fread(internalY, 1, sizeof(internalY), file);
+    fread(framebuffer, 1, sizeof(framebuffer), file);
+    fread(layers, 1, sizeof(layers), file);
+    fread(priorities, 1, sizeof(priorities), file);
+    fread(blendBits, 1, sizeof(blendBits), file);
+#endif
 }
 
 uint32_t Gpu2D::rgb5ToRgb6(uint32_t color) {

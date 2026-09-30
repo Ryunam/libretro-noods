@@ -30,7 +30,12 @@ Gpu::Gpu(Core *core): core(core) {
 Gpu::~Gpu() {
     // Clean up the thread
     if (thread) {
-        running.store(false);
+        {
+            std::lock_guard<std::mutex> lock(threadMutex);
+            threadStopping = true;
+            running.store(false);
+        }
+        threadCond.notify_all();
         thread->join();
         delete thread;
     }
@@ -42,6 +47,10 @@ Gpu::~Gpu() {
         delete[] buffers.hiRes3D;
         framebuffers.pop();
     }
+#ifdef __LIBRETRO__
+    delete[] spareBuffers.framebuffer;
+    delete[] spareBuffers.hiRes3D;
+#endif
 }
 
 void Gpu::saveState(MemFile &file) {
@@ -50,6 +59,14 @@ void Gpu::saveState(MemFile &file) {
     fwrite(&vCount, sizeof(vCount), 1, file);
     fwrite(&dispCapCnt, sizeof(dispCapCnt), 1, file);
     fwrite(&powCnt1, sizeof(powCnt1), 1, file);
+#ifdef __LIBRETRO__
+    fwrite(&frames, sizeof(frames), 1, file);
+    fwrite(&gbaBlock, sizeof(gbaBlock), 1, file);
+    fwrite(&displayCapture, sizeof(displayCapture), 1, file);
+    fwrite(&dirty3D, sizeof(dirty3D), 1, file);
+    fwrite(&prevSize, sizeof(prevSize), 1, file);
+    fwrite(prev, sizeof(uint32_t), prevSize, file);
+#endif
 }
 
 void Gpu::loadState(MemFile &file) {
@@ -58,6 +75,27 @@ void Gpu::loadState(MemFile &file) {
     fread(&vCount, sizeof(vCount), 1, file);
     fread(&dispCapCnt, sizeof(dispCapCnt), 1, file);
     fread(&powCnt1, sizeof(powCnt1), 1, file);
+#ifdef __LIBRETRO__
+    fread(&frames, sizeof(frames), 1, file);
+    fread(&gbaBlock, sizeof(gbaBlock), 1, file);
+    fread(&displayCapture, sizeof(displayCapture), 1, file);
+    fread(&dirty3D, sizeof(dirty3D), 1, file);
+    uint32_t size;
+    fread(&size, sizeof(size), 1, file);
+    if (size > sizeof(prev) / sizeof(*prev)) throw MemFile::Error();
+    fread(prev, sizeof(uint32_t), size, file);
+    if (size < prevSize) memset(prev + size, 0, (prevSize - size) * sizeof(uint32_t));
+    prevSize = size;
+    while (!framebuffers.empty()) {
+        Buffers &buffers = framebuffers.front();
+        std::swap(buffers.framebuffer, spareBuffers.framebuffer);
+        if (buffers.hiRes3D) std::swap(buffers.hiRes3D, spareBuffers.hiRes3D);
+        delete[] buffers.framebuffer;
+        delete[] buffers.hiRes3D;
+        framebuffers.pop();
+    }
+    ready.store(false);
+#endif
 }
 
 uint32_t Gpu::rgb5ToRgb8(uint32_t color) {
@@ -100,7 +138,10 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
     // Get the next queued buffers
     Buffers &buffers = framebuffers.front();
 
-    if (gbaCrop) {
+    if (!out) {
+        if (core->gbaMode && !gbaCrop) gbaBlock = !gbaBlock;
+    }
+    else if (gbaCrop) {
         // Output the frame in RGB8 format, cropped for GBA
         if (Settings::highRes3D || Settings::screenFilter == 1) {
             // GBA doesn't have 3D, but draw the screen upscaled for consistency
@@ -195,23 +236,31 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
     }
 
     // Free the used buffers
+#ifdef __LIBRETRO__
+    std::swap(buffers.framebuffer, spareBuffers.framebuffer);
+    if (buffers.hiRes3D)
+        std::swap(buffers.hiRes3D, spareBuffers.hiRes3D);
+#endif
     delete[] buffers.framebuffer;
     delete[] buffers.hiRes3D;
 
-    if (Settings::screenGhost) {
+    if (out && Settings::screenGhost) {
         // Get the size of the output framebuffer
+#ifndef __LIBRETRO__
         static uint32_t prev[256 * 192 * 8];
+#endif
         uint32_t width = (gbaCrop ? 240 : 256) << (Settings::highRes3D || Settings::screenFilter == 1);
         uint32_t height = (gbaCrop ? 160 : (192 * 2)) << (Settings::highRes3D || Settings::screenFilter == 1);
         uint32_t size = width * height;
+#ifdef __LIBRETRO__
+        prevSize = std::max(prevSize, size);
+#endif
 
         // Blend output with the previous frame if ghosting is enabled
         for (uint32_t i = 0; i < size; i++) {
-            uint8_t r = (((prev[i] >> 0) & 0xFF) + ((out[i] >> 0) & 0xFF)) >> 1;
-            uint8_t g = (((prev[i] >> 8) & 0xFF) + ((out[i] >> 8) & 0xFF)) >> 1;
-            uint8_t b = (((prev[i] >> 16) & 0xFF) + ((out[i] >> 16) & 0xFF)) >> 1;
+            uint32_t color = ((prev[i] & out[i]) & 0xFFFFFF) + (((prev[i] ^ out[i]) & 0xFEFEFE) >> 1);
             prev[i] = out[i];
-            out[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
+            out[i] = 0xFF000000 | color;
         }
     }
 
@@ -225,7 +274,7 @@ bool Gpu::getFrame(uint32_t *out, bool gbaCrop) {
 
 void Gpu::gbaScanline240() {
     if (vCount < 160) {
-        if (thread) {
+        if (running.load()) {
             // Wait for the thread to finish the scanline
             while (drawing.load() != 0)
                 std::this_thread::yield();
@@ -258,12 +307,7 @@ void Gpu::gbaScanline308() {
     switch (++vCount) {
     case 160: // End of visible scanlines
         // Stop the thread now that the frame has been drawn
-        if (thread) {
-            running.store(false);
-            thread->join();
-            delete thread;
-            thread = nullptr;
-        }
+        stopThread();
 
         // Set the V-blank flag
         dispStat[1] |= BIT(0);
@@ -279,7 +323,12 @@ void Gpu::gbaScanline308() {
         if (frames == 0 && framebuffers.size() < 2) {
             // Copy the completed sub-framebuffer to a new framebuffer
             Buffers buffers;
+#ifdef __LIBRETRO__
+            std::swap(buffers.framebuffer, spareBuffers.framebuffer);
+            if (!buffers.framebuffer) buffers.framebuffer = new uint32_t[256 * 192 * 2];
+#else
             buffers.framebuffer = new uint32_t[256 * 160];
+#endif
             memcpy(buffers.framebuffer, core->gpu2D[0].getFramebuffer(), 256 * 160 * sizeof(uint32_t));
 
             // Add the frame to the queue
@@ -308,10 +357,8 @@ void Gpu::gbaScanline308() {
         core->gpu2D[0].reloadRegisters();
 
         // Start the 2D thread if enabled
-        if (Settings::threaded2D && frames == 0 && !thread) {
-            running.store(true);
-            thread = new std::thread(&Gpu::drawGbaThreaded, this);
-        }
+        if (Settings::threaded2D && frames == 0 && !running.load())
+            startThread(true);
         break;
     }
 
@@ -319,7 +366,7 @@ void Gpu::gbaScanline308() {
     core->gpu2D[0].updateWindows(vCount);
 
     // Signal that the next scanline should start drawing
-    if (vCount < 160 && thread)
+    if (vCount < 160 && running.load())
         drawing.store(1);
 
     // Check if the current scanline matches the V-counter
@@ -342,7 +389,7 @@ void Gpu::gbaScanline308() {
 
 void Gpu::scanline256() {
     if (vCount < 192) {
-        if (thread) {
+        if (running.load()) {
             // Make sure the thread has started before changing the state
             while (drawing.load() == 1)
                 std::this_thread::yield();
@@ -485,12 +532,7 @@ void Gpu::scanline355() {
     switch (++vCount) {
     case 192: // End of visible scanlines
         // Stop the thread now that the frame has been drawn
-        if (thread) {
-            running.store(false);
-            thread->join();
-            delete thread;
-            thread = nullptr;
-        }
+        stopThread();
 
         for (int i = 0; i < 2; i++) {
             // Set the V-blank flag
@@ -505,14 +547,19 @@ void Gpu::scanline355() {
         }
 
         // Swap the buffers of the 3D engine if needed
-        if (core->gpu3D.shouldSwap())
+        if (core->gpu3D.shouldSwap()) {
+            core->gpu3DRenderer.finishFrame();
             core->gpu3D.swapBuffers();
+        }
 
         // Allow up to 2 framebuffers to be queued, to preserve frame pacing if emulation runs ahead
         if (frames == 0 && framebuffers.size() < 2) {
             // Copy the completed sub-framebuffers to a new framebuffer
             Buffers buffers;
-            buffers.framebuffer = new uint32_t[256 * 192 * 2];
+#ifdef __LIBRETRO__
+            std::swap(buffers.framebuffer, spareBuffers.framebuffer);
+#endif
+            if (!buffers.framebuffer) buffers.framebuffer = new uint32_t[256 * 192 * 2];
             if (powCnt1 & BIT(0)) { // LCDs enabled
                 if (powCnt1 & BIT(15)) { // Display swap
                     memcpy(&buffers.framebuffer[0], core->gpu2D[0].getFramebuffer(), 256 * 192 * sizeof(uint32_t));
@@ -529,7 +576,10 @@ void Gpu::scanline355() {
 
             // Copy the upscaled 3D output to a new buffer if enabled
             if (Settings::highRes3D && (core->gpu2D[0].readDispCnt() & BIT(3))) {
-                buffers.hiRes3D = new uint32_t[256 * 192 * 4];
+#ifdef __LIBRETRO__
+                std::swap(buffers.hiRes3D, spareBuffers.hiRes3D);
+#endif
+                if (!buffers.hiRes3D) buffers.hiRes3D = new uint32_t[256 * 192 * 4];
                 memcpy(buffers.hiRes3D, core->gpu3DRenderer.getLine(0), 256 * 192 * 4 * sizeof(uint32_t));
                 buffers.top3D = (powCnt1 & BIT(15));
             }
@@ -563,10 +613,8 @@ void Gpu::scanline355() {
         core->gpu2D[1].reloadRegisters();
 
         // Start the 2D thread if enabled
-        if (Settings::threaded2D && frames == 0 && !thread) {
-            running.store(true);
-            thread = new std::thread(&Gpu::drawThreaded, this);
-        }
+        if (Settings::threaded2D && frames == 0 && !running.load())
+            startThread(false);
         break;
     }
 
@@ -575,7 +623,7 @@ void Gpu::scanline355() {
     core->gpu2D[1].updateWindows(vCount);
 
     // Signal that the next scanline should start drawing
-    if (vCount < 192 && thread)
+    if (vCount < 192 && running.load())
         drawing.store(1);
 
     for (int i = 0; i < 2; i++) {
@@ -599,6 +647,38 @@ void Gpu::scanline355() {
 
     // Reschedule the task for the next scanline
     core->schedule(NDS_SCANLINE355, 355 * 6);
+}
+
+void Gpu::startThread(bool gba) {
+    std::lock_guard<std::mutex> lock(threadMutex);
+    if (!thread) thread = new std::thread(&Gpu::runThread, this);
+    threadGba = gba;
+    threadActive = true;
+    running.store(true);
+    threadCond.notify_all();
+}
+
+void Gpu::stopThread() {
+    if (!thread) return;
+    running.store(false);
+    std::unique_lock<std::mutex> lock(threadMutex);
+    threadCond.wait(lock, [&]{ return !threadActive; });
+}
+
+void Gpu::runThread() {
+    std::unique_lock<std::mutex> lock(threadMutex);
+    while (true) {
+        threadCond.wait(lock, [&]{ return threadStopping || threadActive; });
+        if (threadStopping) return;
+        lock.unlock();
+        if (threadGba)
+            drawGbaThreaded();
+        else
+            drawThreaded();
+        lock.lock();
+        threadActive = false;
+        threadCond.notify_all();
+    }
 }
 
 void Gpu::drawGbaThreaded() {

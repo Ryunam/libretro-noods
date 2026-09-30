@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstdint>
+#include <ctime>
 #include "defines.h"
 #include "memfile.h"
 
@@ -47,6 +48,9 @@ public:
 private:
     Core *core;
     bool gpRtc = false;
+#ifdef __LIBRETRO__
+    int64_t startTime = std::time(nullptr);
+#endif
 
     bool csCur = false;
     bool sckCur = false;

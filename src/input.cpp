@@ -19,6 +19,16 @@
 
 #include "core.h"
 
+void Input::saveState(MemFile &file) {
+    fwrite(&keyInput, sizeof(keyInput), 1, file);
+    fwrite(&extKeyIn, sizeof(extKeyIn), 1, file);
+}
+
+void Input::loadState(MemFile &file) {
+    fread(&keyInput, sizeof(keyInput), 1, file);
+    fread(&extKeyIn, sizeof(extKeyIn), 1, file);
+}
+
 void Input::pressKey(int key) {
     // Clear key bits to indicate presses
     if (key < 10) // A, B, select, start, right, left, up, down, R, L

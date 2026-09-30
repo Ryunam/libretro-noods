@@ -38,7 +38,11 @@ public:
     void saveState(MemFile &file);
     void loadState(MemFile &file);
 
+#ifdef __LIBRETRO__
+    uint32_t getSamples(const int16_t *&out);
+#else
     uint32_t *getSamples(int count);
+#endif
     void runGbaSample();
     void runSample();
     void gbaFifoTimer(int timer);
@@ -83,12 +87,17 @@ public:
 private:
     Core *core;
 
+#ifdef __LIBRETRO__
+    int16_t samples[1024 * 2];
+    uint32_t sampleCount = 0;
+#else
     uint32_t *bufferIn = nullptr, *bufferOut = nullptr;
     uint32_t bufferSize = 0, bufferPointer = 0;
 
     std::condition_variable cond1, cond2;
     std::mutex mutex1, mutex2;
     std::atomic<bool> ready;
+#endif
 
     int16_t gbaFrameSequencer = 0;
     int32_t gbaSoundTimers[4] = {};

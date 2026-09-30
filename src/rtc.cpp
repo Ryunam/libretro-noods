@@ -32,6 +32,9 @@ void Rtc::saveState(MemFile &file) {
     fwrite(&rtc, sizeof(rtc), 1, file);
     fwrite(&gpDirection, sizeof(gpDirection), 1, file);
     fwrite(&gpControl, sizeof(gpControl), 1, file);
+#ifdef __LIBRETRO__
+    fwrite(&startTime, sizeof(startTime), 1, file);
+#endif
 }
 
 void Rtc::loadState(MemFile &file) {
@@ -46,6 +49,9 @@ void Rtc::loadState(MemFile &file) {
     fread(&rtc, sizeof(rtc), 1, file);
     fread(&gpDirection, sizeof(gpDirection), 1, file);
     fread(&gpControl, sizeof(gpControl), 1, file);
+#ifdef __LIBRETRO__
+    fread(&startTime, sizeof(startTime), 1, file);
+#endif
 }
 
 void Rtc::updateRtc(bool cs, bool sck, bool sio) {
@@ -90,7 +96,11 @@ void Rtc::updateRtc(bool cs, bool sck, bool sio) {
 
 void Rtc::updateDateTime() {
     // Get the local time
+#ifdef __LIBRETRO__
+    std::time_t t = startTime + (core->rtcCyclesOffset + (uint64_t(core->globalCycles) << core->gbaMode)) / 33554432;
+#else
     std::time_t t = std::time(nullptr);
+#endif
     std::tm *time = std::localtime(&t);
     time->tm_year %= 100; // The DS only counts years 2000-2099
     time->tm_mon++; // The DS starts month values at 1, not 0

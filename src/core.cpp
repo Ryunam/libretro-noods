@@ -154,12 +154,15 @@ void Core::saveState(MemFile &file) {
     fwrite(&dsiMode, sizeof(dsiMode), 1, file);
     fwrite(&gbaMode, sizeof(gbaMode), 1, file);
     fwrite(&globalCycles, sizeof(globalCycles), 1, file);
+#ifdef __LIBRETRO__
+    fwrite(&rtcCyclesOffset, sizeof(rtcCyclesOffset), 1, file);
+#endif
 
     // Parse the scheduler and save its events
     uint32_t count = events.size();
     fwrite(&count, sizeof(count), 1, file);
     for (uint32_t i = 0; i < count; i++)
-        fwrite(&events[i], sizeof(events[i]), 1, file);
+        fwrite(&events[count - 1 - i], sizeof(events[i]), 1, file);
 }
 
 void Core::loadState(MemFile &file) {
@@ -168,6 +171,9 @@ void Core::loadState(MemFile &file) {
     fread(&dsiMode, sizeof(dsiMode), 1, file);
     fread(&gbaMode, sizeof(gbaMode), 1, file);
     fread(&globalCycles, sizeof(globalCycles), 1, file);
+#ifdef __LIBRETRO__
+    fread(&rtcCyclesOffset, sizeof(rtcCyclesOffset), 1, file);
+#endif
 
     // Reset the scheduler and refill it with loaded events
     events.clear();
@@ -176,22 +182,17 @@ void Core::loadState(MemFile &file) {
     fread(&count, sizeof(count), 1, file);
     for (uint32_t i = 0; i < count; i++) {
         fread(&event, sizeof(event), 1, file);
+        if (event.task < 0 || event.task >= MAX_TASKS) throw MemFile::Error();
         events.push_back(event);
     }
+    if (events.empty()) throw MemFile::Error();
+    std::reverse(events.begin(), events.end());
 
     // Update the run function pointer
     updateRun();
 }
 
 void Core::updateRun() {
-#ifdef __LIBRETRO__
-    if (gbaMode)
-        runFunc = &Interpreter::runCoreSingle<true, 0>;
-    else if (dsiMode)
-        runFunc = &Interpreter::runCoreDsi;
-    else
-        runFunc = &Interpreter::runCoreNds;
-#else
     // Set the run function based on active CPUs and core mode
     if (interpreter[0].halted && interpreter[1].halted)
         runFunc = &Interpreter::runCoreNone;
@@ -205,7 +206,6 @@ void Core::updateRun() {
         runFunc = &Interpreter::runCoreSingle<true, 1>;
     else
         runFunc = &Interpreter::runCoreSingle<false, 0>;
-#endif
     running.store(false);
 }
 
@@ -215,19 +215,25 @@ void Core::resetCycles() {
         events[i].cycles -= globalCycles;
     for (int i = 0; i < 2; i++)
         interpreter[i].resetCycles(), timers[i].resetCycles();
+#ifdef __LIBRETRO__
+    rtcCyclesOffset += uint64_t(globalCycles) << gbaMode;
+#endif
     globalCycles -= globalCycles;
     schedule(RESET_CYCLES, 0x7FFFFFFF);
 }
 
 void Core::schedule(SchedTask task, uint32_t cycles) {
-    // Add a task to the scheduler, sorted by least to most cycles until execution
+    // Add a task to the scheduler, sorted by most to least cycles until execution
     SchedEvent event(task, globalCycles + cycles);
-    auto it = std::upper_bound(events.cbegin(), events.cend(), event);
-    events.insert(it, event);
+    auto it = std::upper_bound(events.crbegin(), events.crend(), event);
+    events.insert(it.base(), event);
 }
 
 void Core::enterGbaMode() {
     // Switch to GBA mode
+#ifdef __LIBRETRO__
+    if (!gbaMode) rtcCyclesOffset -= globalCycles;
+#endif
     gbaMode = true;
     interpreter[0].halt(2);
     updateRun();
@@ -262,6 +268,9 @@ void Core::enterGbaMode() {
 }
 
 void Core::endFrame() {
+#ifdef __LIBRETRO__
+    frameEnded = true;
+#endif
     // Break execution at the end of a frame and count it
     running.store(false);
     fpsCount++;

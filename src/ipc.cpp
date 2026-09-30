@@ -45,6 +45,7 @@ void Ipc::loadState(MemFile &file) {
         fifos[i].clear();
         uint32_t count, value;
         fread(&count, sizeof(count), 1, file);
+        if (count > 16) throw MemFile::Error();
         for (uint32_t j = 0; j < count; j++) {
             fread(&value, sizeof(value), 1, file);
             fifos[i].push_back(value);

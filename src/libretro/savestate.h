@@ -11,9 +11,8 @@ class SaveState
 {
   public:
     SaveState(Core* core) : core(core) {}
-    bool check(const void* data, size_t& size);
-    bool save(void* data, size_t& size);
-    bool load(const void* data, size_t& size);
+    void save(MemFile &file);
+    void load(MemFile &file);
 
   private:
     Core* core;

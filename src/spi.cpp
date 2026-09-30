@@ -35,6 +35,16 @@ void Spi::saveState(MemFile &file) {
     fwrite(&command, sizeof(command), 1, file);
     fwrite(&spiCnt, sizeof(spiCnt), 1, file);
     fwrite(&spiData, sizeof(spiData), 1, file);
+#ifdef __LIBRETRO__
+    fwrite(&touchX, sizeof(touchX), 1, file);
+    fwrite(&touchY, sizeof(touchY), 1, file);
+    fwrite(&micCycles, sizeof(micCycles), 1, file);
+    fwrite(&micStep, sizeof(micStep), 1, file);
+    fwrite(&micSample, sizeof(micSample), 1, file);
+    uint32_t count = micBufSize;
+    fwrite(&count, sizeof(count), 1, file);
+    fwrite(micBuffer, sizeof(int16_t), count, file);
+#endif
 }
 
 void Spi::loadState(MemFile &file) {
@@ -44,6 +54,23 @@ void Spi::loadState(MemFile &file) {
     fread(&command, sizeof(command), 1, file);
     fread(&spiCnt, sizeof(spiCnt), 1, file);
     fread(&spiData, sizeof(spiData), 1, file);
+#ifdef __LIBRETRO__
+    fread(&touchX, sizeof(touchX), 1, file);
+    fread(&touchY, sizeof(touchY), 1, file);
+    fread(&micCycles, sizeof(micCycles), 1, file);
+    fread(&micStep, sizeof(micStep), 1, file);
+    fread(&micSample, sizeof(micSample), 1, file);
+    uint32_t count;
+    fread(&count, sizeof(count), 1, file);
+    if (count > 4096) throw MemFile::Error();
+    if (count != micBufSize) {
+        int16_t *buffer = new int16_t[count];
+        delete[] micBuffer;
+        micBuffer = buffer;
+        micBufSize = count;
+    }
+    fread(micBuffer, sizeof(int16_t), count, file);
+#endif
 }
 
 uint16_t Spi::crc16(uint32_t value, uint8_t *data, size_t size) {
@@ -198,19 +225,20 @@ void Spi::clearTouch() {
 }
 
 void Spi::sendMicData(const int16_t* samples, size_t count, size_t rate) {
-    mutex.lock();
+    std::lock_guard<std::mutex> lock(mutex);
 
     // Copy samples into the microphone buffer
-    if (micBuffer) delete[] micBuffer;
-    micBuffer = new int16_t[count];
-    memcpy(micBuffer, samples, count * sizeof(int16_t));
+    if (micBufSize != count) {
+        int16_t *buffer = new int16_t[count];
+        delete[] micBuffer;
+        micBuffer = buffer;
+    }
+    if (count) memcpy(micBuffer, samples, count * sizeof(int16_t));
     micBufSize = count;
 
     // Set the cycle start time of the microphone buffer, and the number of cycles per sample
     micCycles = core->globalCycles;
     micStep = (60 * 263 * 355 * 6) / rate;
-
-    mutex.unlock();
 }
 
 void Spi::writeSpiCnt(uint16_t mask, uint16_t value) {
@@ -275,7 +303,8 @@ void Spi::writeSpiData(uint8_t value) {
                     // Load a sample based on cycle time since the buffer was sent
                     // The sample is converted to an unsigned 12-bit value
                     mutex.lock();
-                    size_t index = std::min<size_t>((core->globalCycles - micCycles) / micStep, micBufSize);
+                    size_t index = (micBufSize && micStep) ?
+                        std::min<size_t>((core->globalCycles - micCycles) / micStep, micBufSize - 1) : 0;
                     micSample = (micBufSize > 0) ? ((micBuffer[index] >> 4) + 0x800) : 0;
                     mutex.unlock();
 

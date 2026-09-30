@@ -17,8 +17,8 @@
     along with NooDS. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <algorithm>
 #include <cstring>
-#include <vector>
 
 #include "core.h"
 
@@ -26,15 +26,25 @@ Gpu3DRenderer::Gpu3DRenderer(Core *core): core(core) {
     // Mark the scanlines as ready to start
     // This is mainly in case 3D is requested before the threads have a chance to start
     for (int i = 0; i < 192 * 2; i++)
-        ready[i].store(3);
+        ready[i].store(3, std::memory_order_release);
 }
 
 Gpu3DRenderer::~Gpu3DRenderer() {
+    {
+        std::lock_guard<std::mutex> lock(threadMutex);
+        stopThreads = true;
+    }
+    threadCond.notify_all();
     // Clean up the threads
     for (size_t i = 0; i < threads.size(); i++) {
         threads[i]->join();
         delete threads[i];
     }
+}
+
+void Gpu3DRenderer::finishFrame() {
+    std::unique_lock<std::mutex> lock(threadMutex);
+    threadCond.wait(lock, [&]{ return threadTasks == 0; });
 }
 
 void Gpu3DRenderer::saveState(MemFile &file) {
@@ -47,6 +57,11 @@ void Gpu3DRenderer::saveState(MemFile &file) {
     fwrite(&fogOffset, sizeof(fogOffset), 1, file);
     fwrite(fogTable, 1, sizeof(fogTable), file);
     fwrite(toonTable, 2, sizeof(toonTable) / 2, file);
+#ifdef __LIBRETRO__
+    fwrite(&resShift, sizeof(resShift), 1, file);
+    fwrite(&framebufferSize, sizeof(framebufferSize), 1, file);
+    fwrite(framebuffer[0], sizeof(uint32_t), framebufferSize, file);
+#endif
 }
 
 void Gpu3DRenderer::loadState(MemFile &file) {
@@ -59,6 +74,17 @@ void Gpu3DRenderer::loadState(MemFile &file) {
     fread(&fogOffset, sizeof(fogOffset), 1, file);
     fread(fogTable, 1, sizeof(fogTable), file);
     fread(toonTable, 2, sizeof(toonTable) / 2, file);
+#ifdef __LIBRETRO__
+    fread(&resShift, sizeof(resShift), 1, file);
+    uint32_t size;
+    fread(&size, sizeof(size), 1, file);
+    if (size != 256 * 192 * 4 && (size != 256 * 192 * 2 || resShift)) throw MemFile::Error();
+    fread(framebuffer[0], sizeof(uint32_t), size, file);
+    if (size < framebufferSize)
+        memset(framebuffer[0] + size, 0, (framebufferSize - size) * sizeof(uint32_t));
+    framebufferSize = size;
+    for (int i = 0; i < 192 * 2; i++) ready[i].store(3, std::memory_order_release);
+#endif
 }
 
 uint32_t Gpu3DRenderer::rgba5ToRgba6(uint32_t color) {
@@ -86,23 +112,11 @@ uint32_t *Gpu3DRenderer::getLine1(int line) {
     // Threads go back for the final pass after drawing their next scanline, so check 2 scanlines ahead
     if (ready[line].load() < 3 && line + activeThreads * 2 < (192 << resShift)) {
         int next = line + activeThreads * 2;
-        switch (ready[next].exchange(1)) {
-        case 0:
+        int expected = 0;
+        if (ready[next].compare_exchange_strong(expected, 1)) {
             // Draw the scanline if it hasn't been started yet
             drawScanline1(next);
-            ready[next].store(2);
-            break;
-
-        case 2:
-            // If the thread somehow caught up, restore the scanline's state
-            if (ready[next].exchange(2) == 3)
-                ready[next].store(3);
-            break;
-
-        case 3:
-            // If the thread somehow caught up, restore the scanline's state
-            ready[next].store(3);
-            break;
+            ready[next].store(2, std::memory_order_release);
         }
     }
 
@@ -113,12 +127,39 @@ uint32_t *Gpu3DRenderer::getLine1(int line) {
 
 void Gpu3DRenderer::drawScanline(int line) {
     if (line == 0) {
+        std::unique_lock<std::mutex> lock(threadMutex);
+        threadCond.wait(lock, [&]{ return threadTasks == 0; });
+        int threadCount = Settings::threaded3D & 0xF;
+
+        if (threads.size() != threadCount) {
+            stopThreads = true;
+            lock.unlock();
+            threadCond.notify_all();
+
+            // Clean up any existing threads
+            for (size_t i = 0; i < threads.size(); i++) {
+                threads[i]->join();
+                delete threads[i];
+            }
+            threads.clear();
+
+            lock.lock();
+            stopThreads = false;
+            for (int i = 0; i < threadCount; i++)
+                threads.push_back(new std::thread(&Gpu3DRenderer::runThread, this, i));
+        }
+
+        int opaque = 0, translucent = core->gpu3D.polygonCountOut;
         // Calculate the scanline bounds for each polygon
         for (int i = 0; i < core->gpu3D.polygonCountOut; i++) {
             polygonTop[i] = 192 * 2;
             polygonBot[i] = 0 * 2;
 
             _Polygon *polygon = &core->gpu3D.polygonsOut[i];
+            if (polygon->alpha < 0x3F || polygon->textureFmt == 1 || polygon->textureFmt == 6)
+                polygonOrder[--translucent] = i;
+            else
+                polygonOrder[opaque++] = i;
             for (int j = 0; j < polygon->size; j++) {
                 Vertex *vertex = &core->gpu3D.verticesOut[polygon->vertices + j];
                 if (vertex->y < polygonTop[i]) polygonTop[i] = vertex->y;
@@ -128,27 +169,24 @@ void Gpu3DRenderer::drawScanline(int line) {
             // Allow horizontal line polygons to be drawn
             if (polygonTop[i] == polygonBot[i]) polygonBot[i]++;
         }
+        std::reverse(polygonOrder + opaque, polygonOrder + core->gpu3D.polygonCountOut);
 
         // Update the resolution shift for the next frame
         resShift = Settings::highRes3D;
-
-        // Clean up any existing threads
-        for (size_t i = 0; i < threads.size(); i++) {
-            threads[i]->join();
-            delete threads[i];
-        }
-        threads.clear();
+#ifdef __LIBRETRO__
+        framebufferSize = std::max(framebufferSize, uint32_t(256 * 192 * 2) << resShift);
+#endif
 
         // Set up threaded 3D rendering if enabled
-        if ((activeThreads = Settings::threaded3D & 0xF)) {
+        if ((activeThreads = threadCount)) {
             // Mark the scanlines as not ready
             for (int i = 0; i < (192 << resShift); i++)
-                ready[i].store(0);
+                ready[i].store(0, std::memory_order_release);
 
-            // Create threads to draw the scanlines
-            for (uint8_t i = 0; i < activeThreads; i++)
-                threads.push_back(new std::thread(&Gpu3DRenderer::drawThreaded, this, i));
+            threadTasks = (1U << activeThreads) - 1;
         }
+        lock.unlock();
+        threadCond.notify_all();
     }
 
     // Draw scanlines normally when threading is disabled
@@ -170,23 +208,30 @@ void Gpu3DRenderer::drawScanline(int line) {
     }
 }
 
+void Gpu3DRenderer::runThread(int thread) {
+    std::unique_lock<std::mutex> lock(threadMutex);
+    while (true) {
+        threadCond.wait(lock, [&]{ return stopThreads || (threadTasks & BIT(thread)); });
+        if (stopThreads) return;
+        lock.unlock();
+        drawThreaded(thread);
+        lock.lock();
+        threadTasks &= ~BIT(thread);
+        if (!threadTasks) threadCond.notify_all();
+    }
+}
+
 void Gpu3DRenderer::drawThreaded(int thread) {
     // Draw the 3D scanlines in a threaded sequence
     // The amount of scanlines skipped per thread depends on the number of active threads
     // Together, they render the entire 3D image
     int i, end = 192 << resShift;
     for (i = thread; i < end; i += activeThreads) {
-        switch (ready[i].exchange(1)) {
-        case 0:
+        int expected = 0;
+        if (ready[i].compare_exchange_strong(expected, 1)) {
             // Draw a scanline if it hasn't been started, save for the final pass
             drawScanline1(i);
-            ready[i].store(2);
-            break;
-
-        case 2:
-            // Restore the scanline's state if it was already drawn
-            ready[i].store(2);
-            break;
+            ready[i].store(2, std::memory_order_release);
         }
 
         if (i < activeThreads) continue;
@@ -198,18 +243,18 @@ void Gpu3DRenderer::drawThreaded(int thread) {
 
         // Finish this thread's previous scanline
         finishScanline(prev);
-        ready[prev].store(3);
+        ready[prev].store(3, std::memory_order_release);
     }
 
     int prev = i - activeThreads;
 
     // Wait for this thread's final scanline and its surrounding scanlines to be drawn
-    while (ready[prev - 1].load() < 2 || ready[prev].load() < 2 || (prev < 191 && ready[prev + 1].load() < 2))
+    while (ready[prev - 1].load() < 2 || ready[prev].load() < 2 || (prev < end - 1 && ready[prev + 1].load() < 2))
         std::this_thread::yield();
 
     // Finish this thread's final scanline
     finishScanline(prev);
-    ready[prev].store(3);
+    ready[prev].store(3, std::memory_order_release);
 }
 
 void Gpu3DRenderer::drawScanline1(int line) {
@@ -230,25 +275,15 @@ void Gpu3DRenderer::drawScanline1(int line) {
 
     stencilClear[line] = false;
 
-    std::vector<int> translucent;
-
     // Draw the polygons
     for (int i = 0; i < core->gpu3D.polygonCountOut; i++) {
+        int polygon = polygonOrder[i];
         // Skip polygons that aren't on the current scanline
-        if (line < polygonTop[i] || line >= polygonBot[i])
+        if (line < polygonTop[polygon] || line >= polygonBot[polygon])
             continue;
 
-        // Draw solid polygons and save the translucent ones for later
-        _Polygon *polygon = &core->gpu3D.polygonsOut[i];
-        if (polygon->alpha < 0x3F || polygon->textureFmt == 1 || polygon->textureFmt == 6)
-            translucent.push_back(i);
-        else
-            drawPolygon(line, i);
+        drawPolygon(line, polygon);
     }
-
-    // Draw the translucent polygons
-    for (unsigned int i = 0; i < translucent.size(); i++)
-        drawPolygon(line, translucent[i]);
 }
 
 void Gpu3DRenderer::finishScanline(int line) {
@@ -291,7 +326,8 @@ void Gpu3DRenderer::finishScanline(int line) {
     // Draw fog if enabled
     if (disp3DCnt & BIT(7)) {
         uint32_t fog = rgba5ToRgba6(((fogColor & 0x001F0000) >> 1) | (fogColor & 0x00007FFF));
-        int fogStep = 0x400 >> ((disp3DCnt & 0x0F00) >> 8);
+        int fogShift = (disp3DCnt & 0x0F00) >> 8;
+        int fogStep = 0x400 >> fogShift;
 
         for (int layer = 0; layer < ((disp3DCnt & BIT(4)) ? 2 : 1); layer++) { // Apply to the back layer as well if anti-aliased
             int start = line * 256 * 2, end = start + (256 << resShift);
@@ -299,7 +335,7 @@ void Gpu3DRenderer::finishScanline(int line) {
                 if (attribBuffer[layer][i] & BIT(13)) { // Fog bit
                     // Determine the fog table index for the current pixel's depth
                     int32_t offset = ((depthBuffer[layer][i] / 0x200) - fogOffset);
-                    int n = (fogStep > 0) ? (offset / fogStep - 1) : ((offset > 0) ? 31 : 0);
+                    int n = (fogStep > 0) ? ((offset > 0) ? ((offset >> (10 - fogShift)) - 1) : -1) : ((offset > 0) ? 31 : 0);
 
                     // Get the fog density from the table
                     uint8_t density;
@@ -310,8 +346,8 @@ void Gpu3DRenderer::finishScanline(int line) {
                         density = fogTable[0];
                     }
                     else { // Linear interpolation
-                        int m = offset % fogStep;
-                        density = ((m >= 0) ? ((fogTable[n + 1] * m + fogTable[n] * (fogStep - m)) / fogStep) : fogTable[0]);
+                        int m = offset & (fogStep - 1);
+                        density = (fogTable[n + 1] * m + fogTable[n] * (fogStep - m)) >> (10 - fogShift);
                     }
 
                     if (density == 127)
@@ -926,6 +962,20 @@ void Gpu3DRenderer::drawPolygon(int line, int polygonIndex) {
     int lastS = 0xFFFF, lastT = 0xFFFF;
     uint32_t texel;
 
+    // Calculate the interpolation factor with a precision of 8 bits for polygon fills
+    auto getFactor = [&](uint32_t x) -> uint32_t {
+        if (we[0] == we[1] && !(we[0] & 0x7F)) // Linear fallback
+            return -1;
+        else if (x <= x1) // Clamp min
+            return 0;
+        else if (x >= x4) // Clamp max
+            return (1 << 8);
+        else if (resShift && ((x - x1) >> 8)) // 64-bit for upscaling
+            return (uint64_t(we[0] * (x - x1)) << 8) / (we[1] * (x4 - x) + we[0] * (x - x1));
+        else // 32-bit
+            return ((we[0] * (x - x1)) << 8) / (we[1] * (x4 - x) + we[0] * (x - x1));
+    };
+
     // Draw a line segment
     for (uint32_t x = x1; x < x4; x++) {
         // Skip the polygon interior for wireframe polygons
@@ -939,18 +989,7 @@ void Gpu3DRenderer::drawPolygon(int line, int polygonIndex) {
         bool layer = 0;
         int i = line * 256 * 2 + x;
 
-        // Calculate the interpolation factor with a precision of 8 bits for polygon fills
-        uint32_t factor;
-        if (we[0] == we[1] && !(we[0] & 0x7F)) // Linear fallback
-            factor = -1;
-        else if (x <= x1) // Clamp min
-            factor = 0;
-        else if (x >= x4) // Clamp max
-            factor = (1 << 8);
-        else if (resShift && ((x - x1) >> 8)) // 64-bit for upscaling
-            factor = (uint64_t(we[0] * (x - x1)) << 8) / (we[1] * (x4 - x) + we[0] * (x - x1));
-        else // 32-bit
-            factor = ((we[0] * (x - x1)) << 8) / (we[1] * (x4 - x) + we[0] * (x - x1));
+        uint32_t factor = polygon->wBuffer ? getFactor(x) : 0;
 
         // Calculate the depth value of the current pixel
         int32_t depth;
@@ -1004,6 +1043,8 @@ void Gpu3DRenderer::drawPolygon(int line, int polygonIndex) {
             // Draw the pixel on the back layer
             layer = 1;
         }
+
+        if (!polygon->wBuffer) factor = getFactor(x);
 
         // Interpolate the vertex color at the current pixel
         uint32_t rv, gv, bv;

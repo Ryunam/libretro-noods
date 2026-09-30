@@ -47,6 +47,10 @@ void Interpreter::saveState(MemFile &file) {
     fwrite(&ie, sizeof(ie), 1, file);
     fwrite(&irf, sizeof(irf), 1, file);
     fwrite(&postFlg, sizeof(postFlg), 1, file);
+#ifdef __LIBRETRO__
+    int8_t biosId = bios ? int(bios - core->hleBios) : -1;
+    fwrite(&biosId, sizeof(biosId), 1, file);
+#endif
 }
 
 void Interpreter::loadState(MemFile &file) {
@@ -75,6 +79,12 @@ void Interpreter::loadState(MemFile &file) {
     // Update mapped registers
     swapRegisters(cpsr);
     pcData = nullptr;
+#ifdef __LIBRETRO__
+    int8_t biosId;
+    fread(&biosId, sizeof(biosId), 1, file);
+    if (biosId < -1 || biosId > 2) throw MemFile::Error();
+    bios = biosId < 0 ? nullptr : &core->hleBios[biosId];
+#endif
 }
 
 void Interpreter::init() {
@@ -108,14 +118,15 @@ void Interpreter::resetCycles() {
 
 void Interpreter::runCoreNone(Core &core) {
     // Run the core with no active CPUs
-    while (core.running.exchange(true)) {
+    while (core.running.load()) {
         // Jump to the next task and run all that are scheduled now
-        core.globalCycles = core.events[0].cycles;
-        while (core.events[0].cycles <= core.globalCycles) {
-            core.tasks[core.events[0].task]();
-            core.events.erase(core.events.begin());
+        core.globalCycles = core.events.back().cycles;
+        while (core.events.back().cycles <= core.globalCycles) {
+            core.tasks[core.events.back().task]();
+            core.events.pop_back();
         }
     }
+    core.running.store(true);
 }
 
 template void Interpreter::runCoreSingle<false, 0>(Core &core);
@@ -124,28 +135,29 @@ template void Interpreter::runCoreSingle<true, 1>(Core &core);
 template <bool _arm7, int shift> void Interpreter::runCoreSingle(Core &core) {
     // Run the core with one active CPU
     Interpreter &arm = core.interpreter[_arm7];
-    while (core.running.exchange(true)) {
+    while (core.running.load()) {
         // Run a CPU until the next scheduled task
         core.globalCycles = std::max(core.globalCycles, arm.cycles);
-        while (core.events[0].cycles > arm.cycles)
+        while (core.events.back().cycles > arm.cycles)
             arm.cycles = (core.globalCycles += arm.runOpcode() << shift);
 
         // Jump to the next task and run all that are scheduled now
-        core.globalCycles = core.events[0].cycles;
-        while (core.events[0].cycles <= core.globalCycles) {
-            core.tasks[core.events[0].task]();
-            core.events.erase(core.events.begin());
+        core.globalCycles = core.events.back().cycles;
+        while (core.events.back().cycles <= core.globalCycles) {
+            core.tasks[core.events.back().task]();
+            core.events.pop_back();
         }
     }
+    core.running.store(true);
 }
 
 void Interpreter::runCoreNds(Core &core) {
     // Run the core with both CPUs active in NDS mode
     Interpreter &arm9 = core.interpreter[0];
     Interpreter &arm7 = core.interpreter[1];
-    while (core.running.exchange(true)) {
+    while (core.running.load()) {
         // Run the ARM9 and half-speed ARM7 until the next scheduled task
-        while (core.events[0].cycles > core.globalCycles) {
+        while (core.events.back().cycles > core.globalCycles) {
             if (!arm9.halted && core.globalCycles >= arm9.cycles)
                 arm9.cycles = core.globalCycles + arm9.runOpcode();
             if (!arm7.halted && core.globalCycles >= arm7.cycles)
@@ -154,21 +166,22 @@ void Interpreter::runCoreNds(Core &core) {
         }
 
         // Jump to the next task and run all that are scheduled now
-        core.globalCycles = core.events[0].cycles;
-        while (core.events[0].cycles <= core.globalCycles) {
-            core.tasks[core.events[0].task]();
-            core.events.erase(core.events.begin());
+        core.globalCycles = core.events.back().cycles;
+        while (core.events.back().cycles <= core.globalCycles) {
+            core.tasks[core.events.back().task]();
+            core.events.pop_back();
         }
     }
+    core.running.store(true);
 }
 
 void Interpreter::runCoreDsi(Core &core) {
     // Run the core in DSi mode
     Interpreter &arm9 = core.interpreter[0];
     Interpreter &arm7 = core.interpreter[1];
-    while (core.running.exchange(true)) {
+    while (core.running.load()) {
         // Run both CPUs until the next scheduled task
-        while (core.events[0].cycles > core.globalCycles) {
+        while (core.events.back().cycles > core.globalCycles) {
             // Run the ARM9 twice as fast as usual
             if (!arm9.halted && core.globalCycles >= arm9.cycles) {
                 int cycles = arm9.runOpcode() + arm9.dsiCycle;
@@ -183,12 +196,13 @@ void Interpreter::runCoreDsi(Core &core) {
         }
 
         // Jump to the next task and run all that are scheduled now
-        core.globalCycles = core.events[0].cycles;
-        while (core.events[0].cycles <= core.globalCycles) {
-            core.tasks[core.events[0].task]();
-            core.events.erase(core.events.begin());
+        core.globalCycles = core.events.back().cycles;
+        while (core.events.back().cycles <= core.globalCycles) {
+            core.tasks[core.events.back().task]();
+            core.events.pop_back();
         }
     }
+    core.running.store(true);
 }
 
 FORCE_INLINE int Interpreter::runOpcode() {
@@ -199,37 +213,39 @@ FORCE_INLINE int Interpreter::runOpcode() {
     // Execute an instruction
     if (cpsr & BIT(5)) { // THUMB mode
         // Increment the program counter and fill the pipeline from pointer or fallback
-        pipeline[1] = (((*registers[15] += 2) & 0xFFE) && pcData) ? U8TO16(pcData += 2, 0) : getOpcode16();
+        pipeline[1] = (((registersUsr[15] += 2) & 0xFFE) && pcData) ? U8TO16(pcData += 2, 0) : getOpcode16();
 
         // Execute a THUMB instruction
         return (this->*thumbInstrs[(opcode >> 6) & 0x3FF])(opcode);
     }
     else { // ARM mode
         // Increment the program counter and fill the pipeline from pointer or fallback
-        pipeline[1] = (((*registers[15] += 4) & 0xFFC) && pcData) ? U8TO32(pcData += 4, 0) : getOpcode32();
+        pipeline[1] = (((registersUsr[15] += 4) & 0xFFC) && pcData) ? U8TO32(pcData += 4, 0) : getOpcode32();
 
         // Execute an ARM instruction based on its condition
-        switch (condition[((opcode >> 24) & 0xF0) | (cpsr >> 28)]) {
-            case 0: return 1; // False
-            case 2: return handleReserved(opcode); // Reserved
-            default: return (this->*armInstrs[((opcode >> 16) & 0xFF0) | ((opcode >> 4) & 0xF)])(opcode);
+        if ((opcode >> 28) != 0xE) {
+            switch (condition[((opcode >> 24) & 0xF0) | (cpsr >> 28)]) {
+                case 0: return 1; // False
+                case 2: return handleReserved(opcode); // Reserved
+            }
         }
+        return (this->*armInstrs[((opcode >> 16) & 0xFF0) | ((opcode >> 4) & 0xF)])(opcode);
     }
 }
 
 uint16_t Interpreter::getOpcode16() {
     // Set the opcode pointer or fall back to a regular 16-bit opcode read
-    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
-        return core->memory.read<uint16_t>(arm7, *registers[15]);
-    pcData += (*registers[15] & 0xFFE);
+    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[registersUsr[15] >> 12]))
+        return core->memory.read<uint16_t>(arm7, registersUsr[15]);
+    pcData += (registersUsr[15] & 0xFFE);
     return U8TO16(pcData, 0);
 }
 
 uint32_t Interpreter::getOpcode32() {
     // Set the opcode pointer or fall back to a regular 32-bit opcode read
-    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[*registers[15] >> 12]))
-        return core->memory.read<uint32_t>(arm7, *registers[15]);
-    pcData += (*registers[15] & 0xFFC);
+    if (!(pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[registersUsr[15] >> 12]))
+        return core->memory.read<uint32_t>(arm7, registersUsr[15]);
+    pcData += (registersUsr[15] & 0xFFC);
     return U8TO32(pcData, 0);
 }
 
@@ -237,22 +253,18 @@ void Interpreter::halt(int bit) {
     // Set a halt bit and disable the CPU if newly halted
     bool before = halted;
     halted |= BIT(bit);
-#ifndef __LIBRETRO__
     if (before) return;
     core->schedule(UPDATE_RUN, 0);
     cycles = 0xFFFFFFFF;
-#endif
 }
 
 void Interpreter::unhalt(int bit) {
     // Clear a halt bit and enable the CPU if newly halted
     bool before = halted;
     halted &= ~BIT(bit);
-#ifndef __LIBRETRO__
     if (!before) return;
     core->schedule(UPDATE_RUN, 0);
     cycles = 0;
-#endif
 }
 
 void Interpreter::sendInterrupt(int bit) {
@@ -293,15 +305,30 @@ int Interpreter::exception(uint8_t vector) {
 
 void Interpreter::flushPipeline() {
     // Adjust the program counter and refill the pipeline after a jump
+    uint32_t &pc = registersUsr[15];
     if (cpsr & BIT(5)) { // THUMB mode
-        *registers[15] = (*registers[15] & ~0x1) + 2;
-        pipeline[0] = core->memory.read<uint16_t>(arm7, *registers[15] - 2);
-        pipeline[1] = getOpcode16();
+        pc = (pc & ~0x1) + 2;
+        if ((pc & 0xFFE) && (pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[pc >> 12])) {
+            pcData += (pc & 0xFFE);
+            pipeline[0] = U8TO16(pcData - 2, 0);
+            pipeline[1] = U8TO16(pcData, 0);
+        }
+        else {
+            pipeline[0] = core->memory.read<uint16_t>(arm7, pc - 2);
+            pipeline[1] = getOpcode16();
+        }
     }
     else { // ARM mode
-        *registers[15] = (*registers[15] & ~0x3) + 4;
-        pipeline[0] = core->memory.read<uint32_t>(arm7, *registers[15] - 4);
-        pipeline[1] = getOpcode32();
+        pc = (pc & ~0x3) + 4;
+        if ((pc & 0xFFC) && (pcData = (arm7 ? core->memory.readMap7 : core->memory.readMap9A)[pc >> 12])) {
+            pcData += (pc & 0xFFC);
+            pipeline[0] = U8TO32(pcData - 4, 0);
+            pipeline[1] = U8TO32(pcData, 0);
+        }
+        else {
+            pipeline[0] = core->memory.read<uint32_t>(arm7, pc - 4);
+            pipeline[1] = getOpcode32();
+        }
     }
 }
 

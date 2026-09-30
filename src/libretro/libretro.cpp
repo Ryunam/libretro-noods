@@ -41,6 +41,10 @@ static std::string gbaPath;
 
 static std::vector<uint32_t> videoBuffer;
 static uint32_t videoBufferSize;
+static uint32_t frameBuffer[256 * 192 * 8];
+static uint32_t frameBufferSize = 0;
+static uint32_t noiseSeed = 1;
+static bool sharedState = false;
 
 static std::string micInputMode;
 static std::string micButtonMode;
@@ -284,7 +288,6 @@ static void initConfig()
 {
   static const retro_variable values[] = {
     { "noods_directBoot", "Direct Boot; enabled|disabled" },
-    { "noods_fpsLimiter", "FPS Limiter; disabled|enabled" },
     { "noods_frameskip", "Frameskip; disabled|enabled" },
     { "noods_romInRam", "Keep ROM in RAM; disabled|enabled" },
     { "noods_dsiMode", "DSi Homebrew Mode; disabled|enabled" },
@@ -324,7 +327,7 @@ static void updateConfig()
   Settings::sdImagePath = systemPath + "nds_sd_card.bin";
 
   Settings::directBoot = fetchVariableBool("noods_directBoot", true);
-  Settings::fpsLimiter = fetchVariableBool("noods_fpsLimiter", false);
+  Settings::fpsLimiter = 0;
   Settings::frameskip = fetchVariableBool("noods_frameskip", false);
   Settings::romInRam = fetchVariableBool("noods_romInRam", false);
   Settings::dsiMode = fetchVariableBool("noods_dsiMode", false);
@@ -432,7 +435,8 @@ static void checkConfigVariables()
   bool updated = false;
   envCallback(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated);
 
-  if (core && gbaModeEnabled != core->gbaMode)
+  bool modeChanged = core && gbaModeEnabled != core->gbaMode;
+  if (modeChanged)
   {
     gbaModeEnabled = core->gbaMode;
     updated = true;
@@ -445,7 +449,10 @@ static void checkConfigVariables()
 
     retro_system_av_info info;
     retro_get_system_av_info(&info);
-    envCallback(RETRO_ENVIRONMENT_SET_GEOMETRY, &info);
+    if (modeChanged)
+      envCallback(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &info);
+    else
+      envCallback(RETRO_ENVIRONMENT_SET_GEOMETRY, &info.geometry);
   }
 }
 
@@ -534,14 +541,22 @@ static void copyScreen(uint32_t *src, uint32_t *dst, int sw, int sh, int dx, int
   }
 }
 
-static void renderVideo()
+static void renderVideo(bool enabled)
 {
+  if (!enabled && !Settings::frameskip && !Settings::screenGhost) {
+    core->gpu.getFrame(nullptr, renderGbaScreen);
+    return;
+  }
   bool shift = Settings::highRes3D || Settings::screenFilter == 1;
   auto width = layout.minWidth << shift;
   auto height = layout.minHeight << shift;
 
-  static uint32_t buffer[256 * 192 * 8];
-  core->gpu.getFrame(buffer, renderGbaScreen);
+  uint32_t *buffer = frameBuffer;
+  if (core->gpu.getFrame(buffer, renderGbaScreen)) {
+    uint32_t size = (renderGbaScreen ? 240 * 160 : 256 * 192 * 2) << (shift * 2);
+    frameBufferSize = std::max(frameBufferSize, size);
+  }
+  if (!enabled) return;
 
   if (renderGbaScreen)
   {
@@ -589,20 +604,11 @@ static void renderVideo()
   videoCallback(videoBuffer.data(), width, height, width * 4);
 }
 
-static void renderAudio()
+static void renderAudio(bool enabled)
 {
-  static int16_t buffer[547 * 2];
-  uint32_t *original = core->spu.getSamples(547);
-
-  for (int i = 0; i < 547; i++)
-  {
-    buffer[i * 2 + 0] = original[i] >>  0;
-    buffer[i * 2 + 1] = original[i] >> 16;
-  }
-  delete[] original;
-
-  uint32_t size = sizeof(buffer) / (2 * sizeof(int16_t));
-  audioBatchCallback(buffer, size);
+  const int16_t *buffer;
+  uint32_t count = core->spu.getSamples(buffer);
+  if (enabled && count) audioBatchCallback(buffer, count);
 }
 
 static void openMicrophone()
@@ -636,7 +642,7 @@ static void sendMicSamples()
   static const size_t maxSamples = 735;
   static int16_t buffer[maxSamples];
 
-  size_t samplesRead = 0;
+  int samplesRead = 0;
 
   if (micInputMode == "Microphone" && microphone && micInterface.get_mic_state(microphone))
   {
@@ -645,7 +651,10 @@ static void sendMicSamples()
   else if (micInputMode == "Noise")
   {
     samplesRead = maxSamples;
-    for (int i = 0; i < maxSamples; i++) buffer[i] = rand() & 0xFFFF;
+    for (int i = 0; i < maxSamples; i++) {
+      noiseSeed = noiseSeed * 1664525U + 1013904223U;
+      buffer[i] = noiseSeed >> 16;
+    }
   }
   else
   {
@@ -653,7 +662,7 @@ static void sendMicSamples()
     memset(buffer, 0, sizeof(buffer));
   }
 
-  if (samplesRead)
+  if (samplesRead > 0)
     core->spi.sendMicData(buffer, samplesRead, 44100);
 }
 
@@ -690,6 +699,13 @@ static bool createCore(std::string ndsRom = "", std::string gbaRom = "")
     if (gbaRom != "") Settings::savePath = getSaveFilePath(gbaRom);
 
     core = new Core(ndsRom, gbaRom);
+    micToggled = micActive = screenSwapped = swapScreens = screenTouched = false;
+    setMicrophoneState(false);
+    lastMouseX = lastMouseY = touchX = touchY = 0;
+    noiseSeed = 1;
+    sharedState = false;
+    memset(frameBuffer, 0, sizeof(frameBuffer));
+    frameBufferSize = 0;
     return true;
   }
   catch (CoreError e)
@@ -724,8 +740,8 @@ void retro_get_system_av_info(retro_system_av_info* info)
   info->geometry.max_height = info->geometry.base_height;
   info->geometry.aspect_ratio = (float)touch.minWidth / (float)touch.minHeight;
 
-  info->timing.fps = 32.0f * 1024.0f * 1024.0f / 560190.0f;
-  info->timing.sample_rate = 32.0f * 1024.0f;
+  info->timing.fps = gbaModeEnabled ? 16777216.0 / 280896.0 : 33554432.0 / 560190.0;
+  info->timing.sample_rate = 32768.0;
 }
 
 void retro_set_environment(retro_environment_t cb)
@@ -861,6 +877,7 @@ void retro_unload_game(void)
     core->cartridgeGba.writeSave();
 
     delete core;
+    core = nullptr;
   }
 
   closeMicrophone();
@@ -874,11 +891,18 @@ void retro_reset(void)
     core->cartridgeGba.writeSave();
   }
 
-  createCore(ndsPath, gbaPath);
+  if (createCore(ndsPath, gbaPath)) {
+    gbaModeEnabled = core->gbaMode;
+    updateScreenLayout();
+    updateScreenState();
+  }
 }
 
 void retro_run(void)
 {
+  int avEnable = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
+  envCallback(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &avEnable);
+  if (sharedState && (avEnable & RETRO_AV_ENABLE_HARD_DISABLE_AUDIO)) core->discardSaves = true;
   checkConfigVariables();
   updateScreenState();
   updateCursorState();
@@ -912,7 +936,7 @@ void retro_run(void)
       micActive = true;
 
     if (prevStatus != micActive) setMicrophoneState(micActive);
-    if (micActive) sendMicSamples();
+    if (micActive && (micInputMode != "Microphone" || !core->discardSaves)) sendMicSamples();
   }
 
   if (!renderGbaScreen)
@@ -1023,44 +1047,97 @@ void retro_run(void)
 
   core->runCore();
 
-  renderVideo();
-  renderAudio();
+  renderAudio(avEnable & RETRO_AV_ENABLE_AUDIO);
+  renderVideo(avEnable & RETRO_AV_ENABLE_VIDEO);
 }
 
 void retro_set_controller_port_device(unsigned port, unsigned device)
 {
 }
 
+static void frontendState(MemFile &file, bool loading)
+{
+  bool oldSwap = swapScreens, oldMic = micActive;
+  auto transfer = [&](void *data, size_t size) {
+    if (loading) file.read(data, 1, size);
+    else file.write(data, 1, size);
+  };
+  transfer(&micToggled, sizeof(micToggled));
+  transfer(&micActive, sizeof(micActive));
+  transfer(&screenSwapped, sizeof(screenSwapped));
+  transfer(&swapScreens, sizeof(swapScreens));
+  transfer(&screenTouched, sizeof(screenTouched));
+  transfer(&lastMouseX, sizeof(lastMouseX));
+  transfer(&lastMouseY, sizeof(lastMouseY));
+  transfer(&touchX, sizeof(touchX));
+  transfer(&touchY, sizeof(touchY));
+  transfer(&noiseSeed, sizeof(noiseSeed));
+  uint32_t size = frameBufferSize;
+  transfer(&size, sizeof(size));
+  if (size > sizeof(frameBuffer) / sizeof(*frameBuffer)) throw MemFile::Error();
+  transfer(frameBuffer, size * sizeof(uint32_t));
+  if (loading) {
+    if (size < frameBufferSize)
+      memset(frameBuffer + size, 0, (frameBufferSize - size) * sizeof(uint32_t));
+    frameBufferSize = size;
+    if (oldSwap != swapScreens && ScreenLayout::screenArrangement != 3) {
+      swapScreenPositions(layout);
+      swapScreenPositions(touch);
+    }
+    if (oldMic != micActive) setMicrophoneState(micActive);
+    updateScreenState();
+  }
+}
+
 size_t retro_serialize_size(void)
 {
-  // HACK: Usually around 6MB but can vary frame to frame!
-  return 1024 * 1024 * 8;
+  return core ? 32 * 1024 * 1024 : 0;
 }
 
 bool retro_serialize(void* data, size_t size)
 {
-  SaveState saveState(core);
-  return saveState.save(data, size);
+  if (!core || !data) return false;
+  try {
+    MemFile file(data, size);
+    retro_savestate_context context = RETRO_SAVESTATE_CONTEXT_NORMAL;
+    envCallback(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context);
+    file.fast = context == RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE ||
+        context == RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_BINARY;
+    uint32_t length = 0;
+    file.write(&length, sizeof(length), 1);
+    SaveState(core).save(file);
+    frontendState(file, false);
+    length = file.tell();
+    file.seek(0, SEEK_SET);
+    file.write(&length, sizeof(length), 1);
+    if (!file.fast) memset(static_cast<uint8_t*>(data) + length, 0, size - length);
+    return true;
+  }
+  catch (const MemFile::Error&) { return false; }
+  catch (const std::bad_alloc&) { return false; }
 }
 
 bool retro_unserialize(const void* data, size_t size)
 {
-  SaveState saveState(core);
-
-  if (!saveState.check(data, size))
-  {
-    struct retro_message_ext message {
-      .msg = "This save state is not compatible with the current core version.",
-      .duration = 300,
-      .level = RETRO_LOG_ERROR,
-      .target = RETRO_MESSAGE_TARGET_ALL,
-    };
-
-    envCallback(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &message);
-    return false;
+  if (!core || !data || size < 12) return false;
+  uint32_t length;
+  memcpy(&length, data, sizeof(length));
+  if (length < 12 || length > size || length > retro_serialize_size()) return false;
+  try {
+    MemFile file(data, length);
+    retro_savestate_context context = RETRO_SAVESTATE_CONTEXT_NORMAL;
+    envCallback(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context);
+    file.fast = context == RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE ||
+        context == RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_BINARY;
+    file.seek(sizeof(length), SEEK_SET);
+    SaveState(core).load(file);
+    frontendState(file, true);
+    if (file.tell() != length) return false;
+    sharedState = context == RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_BINARY;
+    return true;
   }
-
-  return saveState.load(data, size);
+  catch (const MemFile::Error&) { return false; }
+  catch (const std::bad_alloc&) { return false; }
 }
 
 unsigned retro_get_region(void)

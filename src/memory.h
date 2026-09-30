@@ -53,7 +53,7 @@ public:
 
     Memory(Core *core): core(core) {};
     void saveState(MemFile &file);
-    void loadState(MemFile &file);
+    void loadState(MemFile &file, bool rebuild = true);
 
     bool loadBios9();
     bool loadBios7();

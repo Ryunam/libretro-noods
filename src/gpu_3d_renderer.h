@@ -20,9 +20,12 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include "memfile.h"
 
@@ -38,6 +41,7 @@ public:
     void saveState(MemFile &file);
     void loadState(MemFile &file);
 
+    void finishFrame();
     void drawScanline(int line);
     uint32_t *getLine(int line);
 
@@ -57,6 +61,9 @@ private:
 
     bool resShift = false;
     uint32_t framebuffer[2][256 * 192 * 4] = {};
+#ifdef __LIBRETRO__
+    uint32_t framebufferSize = 256 * 192 * 2;
+#endif
     int32_t depthBuffer[2][256 * 192 * 4] = {};
     uint32_t attribBuffer[2][256 * 192 * 4] = {};
     uint8_t stencilBuffer[256 * 192 * 4] = {};
@@ -64,9 +71,14 @@ private:
 
     int polygonTop[2048] = {};
     int polygonBot[2048] = {};
+    uint16_t polygonOrder[2048] = {};
 
     uint8_t activeThreads = 0;
     std::vector<std::thread*> threads;
+    std::mutex threadMutex;
+    std::condition_variable threadCond;
+    uint16_t threadTasks = 0;
+    bool stopThreads = false;
     std::atomic<int> ready[192 * 2];
 
     uint16_t disp3DCnt = 0;
@@ -82,6 +94,7 @@ private:
 
     uint32_t *getLine1(int line);
 
+    void runThread(int thread);
     void drawThreaded(int thread);
     void drawScanline1(int line);
     void finishScanline(int line);

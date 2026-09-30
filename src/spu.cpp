@@ -38,14 +38,18 @@ const int16_t Spu::adpcmTable[] = {
 };
 
 Spu::Spu(Core *core): core(core) {
+#ifndef __LIBRETRO__
     // Mark the buffer as not ready
     ready.store(false);
+#endif
 }
 
 Spu::~Spu() {
+#ifndef __LIBRETRO__
     // Free the buffers
     delete[] bufferIn;
     delete[] bufferOut;
+#endif
 }
 
 void Spu::saveState(MemFile &file) {
@@ -100,6 +104,9 @@ void Spu::saveState(MemFile &file) {
 }
 
 void Spu::loadState(MemFile &file) {
+#ifdef __LIBRETRO__
+    sampleCount = 0;
+#endif
     // Read state data from the file
     fread(&gbaFrameSequencer, sizeof(gbaFrameSequencer), 1, file);
     fread(gbaSoundTimers, 4, sizeof(gbaSoundTimers) / 4, file);
@@ -147,6 +154,7 @@ void Spu::loadState(MemFile &file) {
         uint32_t count;
         int8_t value;
         fread(&count, sizeof(count), 1, file);
+        if (count > 32) throw MemFile::Error();
         for (uint32_t j = 0; j < count; j++) {
             fread(&value, sizeof(value), 1, file);
             gbaFifos[i].push_back(value);
@@ -154,6 +162,14 @@ void Spu::loadState(MemFile &file) {
     }
 }
 
+#ifdef __LIBRETRO__
+uint32_t Spu::getSamples(const int16_t *&out) {
+    out = samples;
+    uint32_t count = sampleCount;
+    sampleCount = 0;
+    return count;
+}
+#else
 uint32_t *Spu::getSamples(int count) {
     // Initialize the buffers
     if (bufferSize != count) {
@@ -210,6 +226,7 @@ uint32_t *Spu::getSamples(int count) {
 
     return out;
 }
+#endif
 
 void Spu::runGbaSample() {
     // Push a dummy sample if disabled and schedule the next one
@@ -517,12 +534,12 @@ void Spu::runSample() {
 
                 // Apply the sample difference to the sample
                 if (adpcmData & BIT(3)) {
-                    adpcmValue[i] += diff;
-                    if (adpcmValue[i] > 0x7FFF) adpcmValue[i] = 0x7FFF;
-                }
-                else {
                     adpcmValue[i] -= diff;
                     if (adpcmValue[i] < -0x7FFF) adpcmValue[i] = -0x7FFF;
+                }
+                else {
+                    adpcmValue[i] += diff;
+                    if (adpcmValue[i] > 0x7FFF) adpcmValue[i] = 0x7FFF;
                 }
 
                 // Calculate the next index
@@ -691,6 +708,12 @@ void Spu::runSample() {
 }
 
 void Spu::pushSample(int16_t sampleLeft, int16_t sampleRight) {
+#ifdef __LIBRETRO__
+    if (sampleCount == sizeof(samples) / (2 * sizeof(*samples))) return;
+    samples[sampleCount * 2] = sampleLeft;
+    samples[sampleCount * 2 + 1] = sampleRight;
+    sampleCount++;
+#else
     // Write the samples to the buffer
     if (!bufferSize) return;
     bufferIn[bufferPointer++] = (sampleRight << 16) | (sampleLeft & 0xFFFF);
@@ -718,6 +741,7 @@ void Spu::pushSample(int16_t sampleLeft, int16_t sampleRight) {
 
     // Reset the buffer pointer
     bufferPointer = 0;
+#endif
 }
 
 void Spu::startChannel(int channel) {

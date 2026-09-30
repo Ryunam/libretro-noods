@@ -4,13 +4,21 @@
 #include <sstream>
 #include <cstdio>
 #include <vector>
+#include <cstring>
+#include <cstdint>
 
 #include "defines.h"
 
 class MemFile
 {
     public:
+        struct Error {};
+        bool fast = false;
         MemFile() : stream(), file(nullptr) {}
+        MemFile(void *data, size_t size) : file(nullptr), source(static_cast<const uint8_t*>(data)),
+            target(static_cast<uint8_t*>(data)), capacity(size), memory(true) {}
+        MemFile(const void *data, size_t size) : file(nullptr), source(static_cast<const uint8_t*>(data)),
+            capacity(size), memory(true) {}
         ~MemFile() { close(); }
 
         MemFile(FILE* cfile) : stream(), file(cfile)
@@ -39,18 +47,39 @@ class MemFile
 
         size_t write(const void* buffer, size_t size, size_t count)
         {
+            if (memory) {
+                if (!target || (size && count > (capacity - position) / size)) throw Error();
+                if (size && count) memcpy(target + position, buffer, size * count);
+                position += size * count;
+                return count;
+            }
             stream.write(static_cast<const char*>(buffer), size * count);
             return size;
         }
 
         size_t read(void* buffer, size_t size, size_t count)
         {
+            if (memory) {
+                if (!source || (size && count > (capacity - position) / size)) throw Error();
+                if (size && count) memcpy(buffer, source + position, size * count);
+                position += size * count;
+                return count;
+            }
             stream.read(static_cast<char*>(buffer), size * count);
             return size;
         }
 
         int seek(long offset, int origin)
         {
+            if (memory) {
+                int64_t next = offset;
+                if (origin == SEEK_CUR) next += position;
+                else if (origin == SEEK_END) next += capacity;
+                else if (origin != SEEK_SET) throw Error();
+                if (next < 0 || uint64_t(next) > capacity) throw Error();
+                position = next;
+                return 0;
+            }
             std::ios_base::seekdir dir;
 
             switch (origin)
@@ -69,6 +98,7 @@ class MemFile
 
         long tell()
         {
+            if (memory) return position;
             return static_cast<long>(stream.tellg());
         }
 
@@ -86,6 +116,10 @@ class MemFile
     private:
         std::stringstream stream;
         FILE* file;
+        const uint8_t *source = nullptr;
+        uint8_t *target = nullptr;
+        size_t capacity = 0, position = 0;
+        bool memory = false;
 };
 
 FORCE_INLINE size_t fread(void* buffer, size_t size, size_t count, MemFile &file)

@@ -56,6 +56,8 @@ protected:
 
     FILE *romFile = nullptr;
     uint8_t *rom = nullptr, *save = nullptr;
+    size_t romCapacity = 0;
+    uint64_t romOffset = 0, romLength = 0;
     int romSize = 0, saveSize = -1;
     bool saveDirty = false;
     std::mutex mutex;

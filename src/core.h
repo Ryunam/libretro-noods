@@ -137,23 +137,37 @@ public:
     std::vector<SchedEvent> events;
     std::function<void()> tasks[MAX_TASKS];
     uint32_t globalCycles = 0;
+#ifdef __LIBRETRO__
+    uint64_t rtcCyclesOffset = 0;
+    bool discardSaves = false;
+#endif
 
     Core(std::string ndsRom = "", std::string gbaRom = "", int id = 0, int ndsRomFd = -1, int gbaRomFd = -1,
         int ndsSaveFd = -1, int gbaSaveFd = -1, int ndsStateFd = -1, int gbaStateFd = -1, int ndsCheatFd = -1);
     void saveState(MemFile &file);
     void loadState(MemFile &file);
 
-    void runCore() { (*runFunc)(*this); }
+    void runCore() {
+#ifdef __LIBRETRO__
+        frameEnded = false;
+        do { (*runFunc)(*this); } while (!frameEnded);
+#else
+        (*runFunc)(*this);
+#endif
+    }
     void schedule(SchedTask task, uint32_t cycles);
     void enterGbaMode();
     void endFrame();
+    void updateRun();
 
 private:
+#ifdef __LIBRETRO__
+    bool frameEnded = false;
+#endif
     bool realGbaBios;
     void (*runFunc)(Core&) = &Interpreter::runCoreNds;
     std::chrono::steady_clock::time_point lastFpsTime;
     int fpsCount = 0;
 
-    void updateRun();
     void resetCycles();
 };

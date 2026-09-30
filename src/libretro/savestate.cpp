@@ -3,39 +3,15 @@
 #include <cstring>
 
 const char* SaveState::stateTag = "NDSR";
-const uint32_t SaveState::stateVersion = 3;
+const uint32_t SaveState::stateVersion = 5;
 
-bool SaveState::check(const void* data, size_t& size)
+void SaveState::save(MemFile &file)
 {
-  if (size == 0) return false;
-
-  // Check if the format tag matches
-  uint8_t tag[4];
-  memcpy(tag, data, 4);
-
-  for (int i = 0; i < 4; i++)
-    if (tag[i] != stateTag[i])
-      return false;
-
-  // Check if the state version matches
-  uint32_t version;
-  memcpy(&version, (uint8_t*)data + 4, 4);
-
-  if (version != stateVersion)
-    return false;
-
-  return true;
-}
-
-bool SaveState::save(void* data, size_t& size)
-{
-  // Open the state file and write the header
-  MemFile file;
-
-  file.write(stateTag, sizeof(uint8_t), 4);
-  file.write(&stateVersion, sizeof(uint32_t), 1);
-
-  // Save the state of every component
+  core->gpu.stopThread();
+  core->gpu3DRenderer.finishFrame();
+  file.write(stateTag, 1, 4);
+  file.write(&stateVersion, sizeof(stateVersion), 1);
+  core->saveState(file);
   core->memory.saveState(file);
   core->cartridgeGba.saveState(file);
   core->cartridgeNds.saveState(file);
@@ -61,24 +37,21 @@ bool SaveState::save(void* data, size_t& size)
   core->timers[0].saveState(file);
   core->timers[1].saveState(file);
   core->wifi.saveState(file);
-  core->saveState(file);
-
-  // Write save data to buffer
-  file.read(data, size, 1);
-
-  return true;
+  core->input.saveState(file);
 }
 
-bool SaveState::load(const void* data, size_t& size)
+void SaveState::load(MemFile &file)
 {
-  // Open the state file and read past the header
-  MemFile file;
-
-  file.write(data, size, 1);
-  file.seek(8, SEEK_SET);
-
-  // Load the state of every component
-  core->memory.loadState(file);
+  char tag[4];
+  uint32_t version;
+  file.read(tag, 1, 4);
+  file.read(&version, sizeof(version), 1);
+  if (memcmp(tag, stateTag, 4) || version != stateVersion) throw MemFile::Error();
+  core->gpu.stopThread();
+  core->gpu3DRenderer.finishFrame();
+  bool dsiMode = core->dsiMode, gbaMode = core->gbaMode;
+  core->loadState(file);
+  core->memory.loadState(file, dsiMode != core->dsiMode || gbaMode != core->gbaMode);
   core->cartridgeGba.loadState(file);
   core->cartridgeNds.loadState(file);
   core->cp15.loadState(file);
@@ -103,7 +76,6 @@ bool SaveState::load(const void* data, size_t& size)
   core->timers[0].loadState(file);
   core->timers[1].loadState(file);
   core->wifi.loadState(file);
-  core->loadState(file);
-
-  return true;
+  core->input.loadState(file);
+  core->updateRun();
 }

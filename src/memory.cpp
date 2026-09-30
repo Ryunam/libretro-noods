@@ -96,7 +96,9 @@ void Memory::saveState(MemFile &file) {
     fwrite(&haltCnt, sizeof(haltCnt), 1, file);
 }
 
-void Memory::loadState(MemFile &file) {
+void Memory::loadState(MemFile &file, bool rebuild) {
+    uint8_t oldVram[sizeof(vramCnt)], oldWram = wramCnt;
+    memcpy(oldVram, vramCnt, sizeof(vramCnt));
     // Read state data from the file
     fread(ram, 1, core->dsiMode ? 0x1000000 : 0x400000, file);
     fread(wram, 1, sizeof(wram), file);
@@ -122,9 +124,15 @@ void Memory::loadState(MemFile &file) {
     fread(&haltCnt, sizeof(haltCnt), 1, file);
 
     // Update mapped memory
-    updateMap9(0x00000000, 0xFFFFFFFF);
-    updateMap7(0x00000000, 0xFFFFFFFF);
-    updateVram();
+    if (rebuild) {
+        updateMap9(0x00000000, 0xFFFFFFFF);
+        updateMap7(0x00000000, 0xFFFFFFFF);
+    }
+    else if (oldWram != wramCnt) {
+        updateMap9(0x3000000, 0x4000000);
+        updateMap7(0x3000000, 0x4000000);
+    }
+    if (rebuild || memcmp(oldVram, vramCnt, sizeof(vramCnt))) updateVram();
 }
 
 bool Memory::loadBios9() {

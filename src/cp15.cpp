@@ -25,6 +25,10 @@ void Cp15::saveState(MemFile &file) {
     fwrite(&dtcmReg, sizeof(dtcmReg), 1, file);
     fwrite(&itcmReg, sizeof(itcmReg), 1, file);
     fwrite(&procId, sizeof(procId), 1, file);
+#ifdef __LIBRETRO__
+    fwrite(&dtcmSize, sizeof(dtcmSize), 1, file);
+    fwrite(&itcmSize, sizeof(itcmSize), 1, file);
+#endif
 }
 
 void Cp15::loadState(MemFile &file) {
@@ -34,11 +38,28 @@ void Cp15::loadState(MemFile &file) {
     fread(&dtcm, sizeof(dtcm), 1, file);
     fread(&itcm, sizeof(itcm), 1, file);
     fread(&procId, sizeof(procId), 1, file);
+#ifdef __LIBRETRO__
+    uint32_t savedDtcmSize, savedItcmSize;
+    fread(&savedDtcmSize, sizeof(savedDtcmSize), 1, file);
+    fread(&savedItcmSize, sizeof(savedItcmSize), 1, file);
+#endif
 
     // Set registers along with values based on them
-    write(1, 0, 0, ctrl);
-    write(9, 1, 0, dtcm);
-    write(9, 1, 1, itcm);
+    if (ctrl != ctrlReg) write(1, 0, 0, ctrl);
+    if (dtcm != dtcmReg) write(9, 1, 0, dtcm);
+    if (itcm != itcmReg) write(9, 1, 1, itcm);
+#ifdef __LIBRETRO__
+    if (savedDtcmSize != dtcmSize) {
+        uint32_t size = std::max(savedDtcmSize, dtcmSize);
+        dtcmSize = savedDtcmSize;
+        core->memory.updateMap9(dtcmAddr, dtcmAddr + size, true);
+    }
+    if (savedItcmSize != itcmSize) {
+        uint32_t size = std::max(savedItcmSize, itcmSize);
+        itcmSize = savedItcmSize;
+        core->memory.updateMap9(0, size, true);
+    }
+#endif
 }
 
 uint32_t Cp15::read(uint8_t cn, uint8_t cm, uint8_t cp) {

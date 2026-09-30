@@ -20,12 +20,16 @@
 #pragma once
 
 #include <cstdint>
+#include "memfile.h"
 
 class Core;
 
 class Input {
 public:
     Input(Core *core): core(core) {}
+
+    void saveState(MemFile &file);
+    void loadState(MemFile &file);
 
     void pressKey(int key);
     void releaseKey(int key);

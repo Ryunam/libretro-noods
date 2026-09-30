@@ -19,6 +19,20 @@
 
 #include "core.h"
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
+static FORCE_INLINE int firstRegister(uint32_t mask) {
+#ifdef _MSC_VER
+    unsigned long index;
+    _BitScanForward(&index, mask);
+    return index;
+#else
+    return __builtin_ctz(mask);
+#endif
+}
+
 // Define functions for each ARM offset variation (half type)
 #define HALF_FUNCS(func) \
     int Interpreter::func##Ofrm(uint32_t opcode) { return func##Of(opcode, -rp(opcode)); } \
@@ -539,8 +553,8 @@ int Interpreter::ldmda(uint32_t opcode) { // LDMDA Rn, <Rlist>
     // Block load, post-decrement without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, op0 += 4);
     }
 
@@ -555,8 +569,8 @@ int Interpreter::stmda(uint32_t opcode) { // STMDA Rn, <Rlist>
     // Block store, post-decrement without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0 += 4, *registers[i]);
     }
     return m + (arm7 || m < 2);
@@ -566,8 +580,8 @@ int Interpreter::ldmia(uint32_t opcode) { // LDMIA Rn, <Rlist>
     // Block load, post-increment without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, op0);
         op0 += 4;
     }
@@ -583,8 +597,8 @@ int Interpreter::stmia(uint32_t opcode) { // STMIA Rn, <Rlist>
     // Block store, post-increment without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0, *registers[i]);
         op0 += 4;
     }
@@ -595,8 +609,8 @@ int Interpreter::ldmdb(uint32_t opcode) { // LDMDB Rn, <Rlist>
     // Block load, pre-decrement without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, op0);
         op0 += 4;
     }
@@ -612,8 +626,8 @@ int Interpreter::stmdb(uint32_t opcode) { // STMDB Rn, <Rlist>
     // Block store, pre-decrement without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0, *registers[i]);
         op0 += 4;
     }
@@ -624,8 +638,8 @@ int Interpreter::ldmib(uint32_t opcode) { // LDMIB Rn, <Rlist>
     // Block load, pre-increment without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, op0 += 4);
     }
 
@@ -640,8 +654,8 @@ int Interpreter::stmib(uint32_t opcode) { // STMIB Rn, <Rlist>
     // Block store, pre-increment without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0 += 4, *registers[i]);
     }
     return m + (arm7 || m < 2);
@@ -652,8 +666,8 @@ int Interpreter::ldmdaW(uint32_t opcode) { // LDMDA Rn!, <Rlist>
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] -= (m << 2));
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, address += 4);
     }
 
@@ -677,8 +691,8 @@ int Interpreter::stmdaW(uint32_t opcode) { // STMDA Rn!, <Rlist>
         *registers[op0] = address;
 
     // Block store, post-decrement with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address += 4, *registers[i]);
     }
     *registers[op0] = address - (m << 2);
@@ -690,8 +704,8 @@ int Interpreter::ldmiaW(uint32_t opcode) { // LDMIA Rn!, <Rlist>
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] += (m << 2)) - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, address);
         address += 4;
     }
@@ -716,8 +730,8 @@ int Interpreter::stmiaW(uint32_t opcode) { // STMIA Rn!, <Rlist>
         *registers[op0] = address + (m << 2);
 
     // Block store, post-increment with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address, *registers[i]);
         address += 4;
     }
@@ -730,8 +744,8 @@ int Interpreter::ldmdbW(uint32_t opcode) { // LDMDB Rn!, <Rlist>
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] -= (m << 2));
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, address);
         address += 4;
     }
@@ -756,8 +770,8 @@ int Interpreter::stmdbW(uint32_t opcode) { // STMDB Rn!, <Rlist>
         *registers[op0] = address;
 
     // Block store, pre-decrement with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address, *registers[i]);
         address += 4;
     }
@@ -770,8 +784,8 @@ int Interpreter::ldmibW(uint32_t opcode) { // LDMIB Rn!, <Rlist>
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] += (m << 2)) - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, address += 4);
     }
 
@@ -795,8 +809,8 @@ int Interpreter::stmibW(uint32_t opcode) { // STMIB Rn!, <Rlist>
         *registers[op0] = address + (m << 2);
 
     // Block store, pre-increment with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address += 4, *registers[i]);
     }
     *registers[op0] = address;
@@ -808,8 +822,8 @@ int Interpreter::ldmdaU(uint32_t opcode) { // LDMDA Rn, <Rlist>^
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, op0 += 4);
     }
 
@@ -825,8 +839,8 @@ int Interpreter::stmdaU(uint32_t opcode) { // STMDA Rn, <Rlist>^
     // User block store, post-decrement without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0 += 4, registersUsr[i]);
     }
     return m + (arm7 || m < 2);
@@ -837,8 +851,8 @@ int Interpreter::ldmiaU(uint32_t opcode) { // LDMIA Rn, <Rlist>^
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, op0);
         op0 += 4;
     }
@@ -855,8 +869,8 @@ int Interpreter::stmiaU(uint32_t opcode) { // STMIA Rn, <Rlist>^
     // User block store, post-increment without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0, registersUsr[i]);
         op0 += 4;
     }
@@ -868,8 +882,8 @@ int Interpreter::ldmdbU(uint32_t opcode) { // LDMDB Rn, <Rlist>^
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, op0);
         op0 += 4;
     }
@@ -886,8 +900,8 @@ int Interpreter::stmdbU(uint32_t opcode) { // STMDB Rn, <Rlist>^
     // User block store, pre-decrement without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF] - (m << 2);
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0, registersUsr[i]);
         op0 += 4;
     }
@@ -899,8 +913,8 @@ int Interpreter::ldmibU(uint32_t opcode) { // LDMIB Rn, <Rlist>^
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, op0 += 4);
     }
 
@@ -916,8 +930,8 @@ int Interpreter::stmibU(uint32_t opcode) { // STMIB Rn, <Rlist>^
     // User block store, pre-increment without writeback
     uint8_t m = bitCount[opcode & 0xFF] + bitCount[(opcode >> 8) & 0xFF];
     uint32_t op0 = *registers[(opcode >> 16) & 0xF];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, op0 += 4, registersUsr[i]);
     }
     return m + (arm7 || m < 2);
@@ -929,8 +943,8 @@ int Interpreter::ldmdaUW(uint32_t opcode) { // LDMDA Rn!, <Rlist>^
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] -= (m << 2));
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, address += 4);
     }
 
@@ -955,8 +969,8 @@ int Interpreter::stmdaUW(uint32_t opcode) { // STMDA Rn!, <Rlist>^
         *registers[op0] = address;
 
     // User block store, post-decrement with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address += 4, registersUsr[i]);
     }
     *registers[op0] = address - (m << 2);
@@ -969,8 +983,8 @@ int Interpreter::ldmiaUW(uint32_t opcode) { // LDMIA Rn!, <Rlist>^
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] += (m << 2)) - (m << 2);
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, address);
         address += 4;
     }
@@ -996,8 +1010,8 @@ int Interpreter::stmiaUW(uint32_t opcode) { // STMIA Rn!, <Rlist>^
         *registers[op0] = address + (m << 2);
 
     // User block store, post-increment with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address, registersUsr[i]);
         address += 4;
     }
@@ -1011,8 +1025,8 @@ int Interpreter::ldmdbUW(uint32_t opcode) { // LDMDB Rn!, <Rlist>^
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] -= (m << 2));
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, address);
         address += 4;
     }
@@ -1038,8 +1052,8 @@ int Interpreter::stmdbUW(uint32_t opcode) { // STMDB Rn!, <Rlist>^
         *registers[op0] = address;
 
     // User block store, pre-decrement with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address, registersUsr[i]);
         address += 4;
     }
@@ -1053,8 +1067,8 @@ int Interpreter::ldmibUW(uint32_t opcode) { // LDMIB Rn!, <Rlist>^
     uint8_t op0 = (opcode >> 16) & 0xF;
     uint32_t address = (*registers[op0] += (m << 2)) - (m << 2);
     uint32_t **regs = &registers[(~opcode & BIT(15)) >> 11];
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *regs[i] = core->memory.read<uint32_t>(arm7, address += 4);
     }
 
@@ -1079,8 +1093,8 @@ int Interpreter::stmibUW(uint32_t opcode) { // STMIB Rn!, <Rlist>^
         *registers[op0] = address + (m << 2);
 
     // User block store, pre-increment with writeback
-    for (int i = 0; i < 16; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFFFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address += 4, registersUsr[i]);
     }
     *registers[op0] = address;
@@ -1379,8 +1393,8 @@ int Interpreter::ldmiaT(uint16_t opcode) { // LDMIA Rb!,<Rlist>
     uint8_t m = bitCount[opcode & 0xFF];
     uint32_t *op0 = registers[(opcode >> 8) & 0x7];
     uint32_t address = (*op0 += (m << 2)) - (m << 2);
-    for (int i = 0; i < 8; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, address);
         address += 4;
     }
@@ -1396,8 +1410,8 @@ int Interpreter::stmiaT(uint16_t opcode) { // STMIA Rb!,<Rlist>
         *registers[op0] = address + (m << 2);
 
     // Block store, post-increment with writeback (THUMB)
-    for (int i = 0; i < 8; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address, *registers[i]);
         address += 4;
     }
@@ -1408,8 +1422,8 @@ int Interpreter::stmiaT(uint16_t opcode) { // STMIA Rb!,<Rlist>
 int Interpreter::popT(uint16_t opcode) { // POP <Rlist>
     // SP-relative block load, post-increment with writeback (THUMB)
     uint8_t m = bitCount[opcode & 0xFF];
-    for (int i = 0; i < 8; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, *registers[13]);
         *registers[13] += 4;
     }
@@ -1420,8 +1434,8 @@ int Interpreter::pushT(uint16_t opcode) { // PUSH <Rlist>
     // SP-relative block store, pre-decrement with writeback (THUMB)
     uint8_t m = bitCount[opcode & 0xFF];
     uint32_t address = (*registers[13] -= (m << 2));
-    for (int i = 0; i < 8; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address, *registers[i]);
         address += 4;
     }
@@ -1431,8 +1445,8 @@ int Interpreter::pushT(uint16_t opcode) { // PUSH <Rlist>
 int Interpreter::popPcT(uint16_t opcode) { // POP <Rlist>,PC
     // SP-relative block load, post-increment with writeback (THUMB)
     uint8_t m = bitCount[opcode & 0xFF] + 1;
-    for (int i = 0; i < 8; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         *registers[i] = core->memory.read<uint32_t>(arm7, *registers[13]);
         *registers[13] += 4;
     }
@@ -1449,8 +1463,8 @@ int Interpreter::pushLrT(uint16_t opcode) { // PUSH <Rlist>,LR
     // SP-relative block store, pre-decrement with writeback (THUMB)
     uint8_t m = bitCount[opcode & 0xFF] + 1;
     uint32_t address = (*registers[13] -= (m << 2));
-    for (int i = 0; i < 8; i++) {
-        if (~opcode & BIT(i)) continue;
+    for (uint32_t list = opcode & 0xFF; list; list &= list - 1) {
+        int i = firstRegister(list);
         core->memory.write<uint32_t>(arm7, address, *registers[i]);
         address += 4;
     }

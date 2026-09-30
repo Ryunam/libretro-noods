@@ -85,14 +85,24 @@ bool Cartridge::loadRom() {
 
 void Cartridge::loadRomSection(size_t offset, size_t size) {
     // Load a section of the current ROM file into memory
-    if (rom) delete[] rom;
-    rom = new uint8_t[size];
+    if (!rom || size > romCapacity) {
+        uint8_t *newRom = new uint8_t[size];
+        delete[] rom;
+        rom = newRom;
+        romCapacity = size;
+    }
     fseek(romFile, offset, SEEK_SET);
-    fread(rom, sizeof(uint8_t), size, romFile);
+    size_t loaded = fread(rom, sizeof(uint8_t), size, romFile);
+    if (loaded < size) memset(rom + loaded, 0xFF, size - loaded);
     core->dldi.patchRom(rom, offset, size);
+    romOffset = offset;
+    romLength = size;
 }
 
 void Cartridge::writeSave() {
+#ifdef __LIBRETRO__
+    if (core->discardSaves) return;
+#endif
     // Update the save file if the data changed
     mutex.lock();
     if (saveDirty) {
@@ -127,6 +137,7 @@ void Cartridge::trimRom() {
         memcpy(newRom, rom, newSize * sizeof(uint8_t));
         delete[] rom;
         rom = newRom;
+        romCapacity = newSize;
 
         // Update the ROM file
         FILE *romFile = (romFd == -1) ? fopen(romPath.c_str(), "wb") : fdopen(dup(romFd), "wb");
@@ -139,19 +150,23 @@ void Cartridge::trimRom() {
 }
 
 void Cartridge::resizeSave(int newSize, bool dirty) {
-    mutex.lock();
+    std::lock_guard<std::mutex> lock(mutex);
+    if (newSize == saveSize) {
+        if (dirty) saveDirty = true;
+        return;
+    }
     uint8_t *newSave = new uint8_t[newSize];
 
     // Resize the save
     if (saveSize < newSize) { // New save is larger
         // Copy all of the old save and fill the rest with 0xFF
         if (saveSize < 0) saveSize = 0;
-        memcpy(newSave, save, saveSize * sizeof(uint8_t));
+        if (saveSize > 0) memcpy(newSave, save, saveSize * sizeof(uint8_t));
         memset(&newSave[saveSize], 0xFF, (newSize - saveSize) * sizeof(uint8_t));
     }
     else { // New save is smaller
         // Copy as much of the old save as possible
-        memcpy(newSave, save, newSize * sizeof(uint8_t));
+        if (newSize > 0) memcpy(newSave, save, newSize * sizeof(uint8_t));
     }
 
     // Swap the old save for the new one
@@ -159,7 +174,6 @@ void Cartridge::resizeSave(int newSize, bool dirty) {
     save = newSave;
     saveSize = newSize;
     if (dirty) saveDirty = true;
-    mutex.unlock();
 }
 
 void CartridgeNds::saveState(MemFile &file) {
@@ -182,11 +196,24 @@ void CartridgeNds::saveState(MemFile &file) {
     fwrite(auxSpiData, 1, sizeof(auxSpiData), file);
     fwrite(romCtrl, 4, sizeof(romCtrl) / 4, file);
     fwrite(romCmdOut, 8, sizeof(romCmdOut) / 8, file);
+#ifdef __LIBRETRO__
+    fwrite(&saveDirty, sizeof(saveDirty), 1, file);
+    bool streamed = romFile != nullptr;
+    fwrite(&streamed, sizeof(streamed), 1, file);
+    fwrite(&romOffset, sizeof(romOffset), 1, file);
+    fwrite(&romLength, sizeof(romLength), 1, file);
+#endif
 }
 
 void CartridgeNds::loadState(MemFile &file) {
     // Read state data from the file
-    fread(&saveSize, sizeof(saveSize), 1, file);
+    int size;
+    fread(&size, sizeof(size), 1, file);
+    if (size < -1 || size > 0x800000) throw MemFile::Error();
+    if (size != saveSize) {
+        resizeSave(std::max(size, 0), false);
+        saveSize = size;
+    }
     if (saveSize > 0) fread(save, 1, saveSize, file);
     fread(&cmdMode, sizeof(cmdMode), 1, file);
     fread(encTable, 4, sizeof(encTable) / 4, file);
@@ -206,7 +233,20 @@ void CartridgeNds::loadState(MemFile &file) {
     fread(romCmdOut, 8, sizeof(romCmdOut) / 8, file);
 
     // Don't overwrite the save file right away; wait until it's modified
+#ifdef __LIBRETRO__
+    fread(&saveDirty, sizeof(saveDirty), 1, file);
+    if (!file.fast) saveDirty = false;
+    bool streamed;
+    uint64_t offset, length;
+    fread(&streamed, sizeof(streamed), 1, file);
+    fread(&offset, sizeof(offset), 1, file);
+    fread(&length, sizeof(length), 1, file);
+    if (streamed != (romFile != nullptr) || offset > romMask || length > uint64_t(std::max(romSize, 0x10000)))
+        throw MemFile::Error();
+    if (streamed && (offset != romOffset || length != romLength)) loadRomSection(offset, length);
+#else
     saveDirty = false;
+#endif
 }
 
 bool CartridgeNds::loadRom() {
@@ -888,11 +928,20 @@ void CartridgeGba::saveState(MemFile &file) {
     fwrite(&flashCmd, sizeof(flashCmd), 1, file);
     fwrite(&bankSwap, sizeof(bankSwap), 1, file);
     fwrite(&flashErase, sizeof(flashErase), 1, file);
+#ifdef __LIBRETRO__
+    fwrite(&saveDirty, sizeof(saveDirty), 1, file);
+#endif
 }
 
 void CartridgeGba::loadState(MemFile &file) {
     // Read state data from the file
-    fread(&saveSize, sizeof(saveSize), 1, file);
+    int size;
+    fread(&size, sizeof(size), 1, file);
+    if (size < -1 || size > 0x20000) throw MemFile::Error();
+    if (size != saveSize) {
+        resizeSave(std::max(size, 0), false);
+        saveSize = size;
+    }
     if (saveSize > 0) fread(save, 1, saveSize, file);
     fread(&eepromCount, sizeof(eepromCount), 1, file);
     fread(&eepromCmd, sizeof(eepromCmd), 1, file);
@@ -903,7 +952,12 @@ void CartridgeGba::loadState(MemFile &file) {
     fread(&flashErase, sizeof(flashErase), 1, file);
 
     // Don't overwrite the save file right away; wait until it's modified
+#ifdef __LIBRETRO__
+    fread(&saveDirty, sizeof(saveDirty), 1, file);
+    if (!file.fast) saveDirty = false;
+#else
     saveDirty = false;
+#endif
 }
 
 bool CartridgeGba::findString(std::string string) {

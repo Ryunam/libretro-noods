@@ -20,6 +20,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <thread>
 #include <mutex>
@@ -38,6 +39,7 @@ public:
     void saveState(MemFile &file);
     void loadState(MemFile &file);
 
+    void stopThread();
     bool getFrame(uint32_t *out, bool gbaCrop);
     void invalidate3D() { dirty3D |= BIT(0); }
 
@@ -65,12 +67,20 @@ private:
     };
 
     std::queue<Buffers> framebuffers;
+#ifdef __LIBRETRO__
+    Buffers spareBuffers;
+    uint32_t prev[256 * 192 * 8] = {};
+    uint32_t prevSize = 0;
+#endif
     std::atomic<bool> ready;
     std::mutex mutex;
 
     std::atomic<bool> running;
     std::atomic<int> drawing;
     std::thread *thread = nullptr;
+    std::mutex threadMutex;
+    std::condition_variable threadCond;
+    bool threadActive = false, threadStopping = false, threadGba = false;
 
     int frames = 0;
     bool gbaBlock = true;
@@ -86,6 +96,8 @@ private:
     static uint32_t rgb6ToRgb8(uint32_t color);
     static uint16_t rgb6ToRgb5(uint32_t color);
 
+    void startThread(bool gba);
+    void runThread();
     void drawGbaThreaded();
     void drawThreaded();
 };

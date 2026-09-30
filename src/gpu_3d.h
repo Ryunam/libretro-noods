@@ -184,7 +184,7 @@ private:
 
     Vertex savedVertex;
     _Polygon savedPolygon;
-    int16_t s, t;
+    int16_t s = 0, t = 0;
 
     int vertexCount = 0;
     bool clockwise = false;
@@ -226,17 +226,17 @@ private:
     void mtxStoreCmd(uint32_t param);
     void mtxRestoreCmd(uint32_t param);
     void mtxIdentityCmd();
-    void mtxLoad44Cmd(std::vector<uint32_t> &params);
-    void mtxLoad43Cmd(std::vector<uint32_t> &params);
-    void mtxMult44Cmd(std::vector<uint32_t> &params);
-    void mtxMult43Cmd(std::vector<uint32_t> &params);
-    void mtxMult33Cmd(std::vector<uint32_t> &params);
-    void mtxScaleCmd(std::vector<uint32_t> &params);
-    void mtxTransCmd(std::vector<uint32_t> &params);
+    void mtxLoad44Cmd(const uint32_t *params);
+    void mtxLoad43Cmd(const uint32_t *params);
+    void mtxMult44Cmd(const uint32_t *params);
+    void mtxMult43Cmd(const uint32_t *params);
+    void mtxMult33Cmd(const uint32_t *params);
+    void mtxScaleCmd(const uint32_t *params);
+    void mtxTransCmd(const uint32_t *params);
     void colorCmd(uint32_t param);
     void normalCmd(uint32_t param);
     void texCoordCmd(uint32_t param);
-    void vtx16Cmd(std::vector<uint32_t> &params);
+    void vtx16Cmd(const uint32_t *params);
     void vtx10Cmd(uint32_t param);
     void vtxXYCmd(uint32_t param);
     void vtxXZCmd(uint32_t param);
@@ -249,12 +249,12 @@ private:
     void speEmiCmd(uint32_t param);
     void lightVectorCmd(uint32_t param);
     void lightColorCmd(uint32_t param);
-    void shininessCmd(std::vector<uint32_t> &params);
+    void shininessCmd(const uint32_t *params);
     void beginVtxsCmd(uint32_t param);
     void swapBuffersCmd(uint32_t param);
     void viewportCmd(uint32_t param);
-    void boxTestCmd(std::vector<uint32_t> &params);
-    void posTestCmd(std::vector<uint32_t> &params);
+    void boxTestCmd(const uint32_t *params);
+    void posTestCmd(const uint32_t *params);
     void vecTestCmd(uint32_t param);
 
     void addEntry(Entry entry);
